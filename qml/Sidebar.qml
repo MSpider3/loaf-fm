@@ -69,9 +69,12 @@ Rectangle {
     readonly property int dividerHeight: 9
     readonly property int rowSpacing: 4
 
-    // Rows shrink (44 -> 32 px) so everything fits without scrolling, like
-    // Nautilus; only a very short window still scrolls.
+    // "fit" (default): rows shrink (44 -> 32 px) so everything fits without
+    // scrolling, like Nautilus; only a very short window still scrolls.
+    // "comfortable" / "compact" use a fixed height and scroll when needed.
     readonly property int rowH: {
+        if (theme.sidebarSize === "comfortable") return 44;
+        if (theme.sidebarSize === "compact") return 32;
         var n = Math.max(1, entries.length);
         var avail = placeList.height - dividerCount * dividerHeight - (n - 1) * rowSpacing - 8;
         return Math.max(32, Math.min(44, Math.floor(avail / n)));
@@ -118,12 +121,13 @@ Rectangle {
         radius: height / 2
         color: theme.primaryContainer
         visible: opacity > 0.01
-        opacity: targetY >= 0 ? 1.0 : 0.0
+        opacity: shown ? 1.0 : 0.0
         property real targetY: -100
+        property bool shown: false
         y: targetY
 
         Behavior on y {
-            enabled: theme.animate
+            enabled: theme.animate && selectionHighlight.shown // appear in place, don't fly in
             SpringAnimation { spring: 4.2; damping: 0.38 }
         }
         Behavior on width {
@@ -136,19 +140,22 @@ Rectangle {
         }
     }
 
+    function showHighlightAt(y) {
+        selectionHighlight.targetY = y; // set before shown, so a hidden pill jumps instead of gliding
+        selectionHighlight.shown = true;
+    }
+
     function updateHighlight() {
         if (!rail.activeId || rail.activeId.length === 0) {
-            selectionHighlight.targetY = -100;
+            selectionHighlight.shown = false;
             return;
         }
         if (rail.activeId === "settings") {
-            var pt = settingsBtn.mapToItem(rail, 0, 0);
-            selectionHighlight.targetY = pt.y;
+            showHighlightAt(settingsBtn.mapToItem(rail, 0, 0).y);
             return;
         }
         if (rail.activeId === "trash" && rail.showTrash) {
-            var ptTrash = trashContainer.mapToItem(rail, 0, 0);
-            selectionHighlight.targetY = ptTrash.y;
+            showHighlightAt(trashContainer.mapToItem(rail, 0, 0).y);
             return;
         }
         var filtered = placeList.model || [];
@@ -157,15 +164,31 @@ Rectangle {
                 var it = placeList.itemAtIndex(i);
                 if (it) {
                     var p = it.button.mapToItem(rail, 0, 0);
-                    selectionHighlight.targetY = p.y;
+                    // The pill lives outside the list; hide it when the row is scrolled out.
+                    var top = placeList.mapToItem(rail, 0, 0).y;
+                    if (p.y < top || p.y + rail.rowH > top + placeList.height)
+                        break;
+                    showHighlightAt(p.y);
                     return;
                 }
             }
         }
-        selectionHighlight.targetY = -100;
+        selectionHighlight.shown = false;
     }
 
-    onActiveIdChanged: Qt.callLater(updateHighlight)
+    // Scroll a newly selected, partly hidden row fully into view, then place the pill.
+    function revealActive() {
+        var list = placeList.model || [];
+        for (var i = 0; i < list.length; ++i) {
+            if (list[i].id === rail.activeId) {
+                placeList.positionViewAtIndex(i, ListView.Contain);
+                break;
+            }
+        }
+        updateHighlight();
+    }
+
+    onActiveIdChanged: Qt.callLater(revealActive)
     onShowTrashChanged: Qt.callLater(updateHighlight)
     onExpandedChanged: Qt.callLater(updateHighlight)
     onRowHChanged: Qt.callLater(updateHighlight)
@@ -291,6 +314,7 @@ Rectangle {
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded; width: 6 }
 
             onContentYChanged: rail.updateHighlight()
+            onContentHeightChanged: Qt.callLater(rail.updateHighlight)
             onCountChanged: Qt.callLater(rail.updateHighlight)
             Component.onCompleted: Qt.callLater(rail.updateHighlight)
 
@@ -394,6 +418,7 @@ Rectangle {
         Item {
             id: trashContainer
             Layout.fillWidth: true
+            onYChanged: Qt.callLater(rail.updateHighlight) // layout moves it after rowH changes
             Layout.preferredHeight: rail.showTrash ? rail.rowH : 0
             visible: Layout.preferredHeight > 0.01
             clip: true
@@ -430,6 +455,7 @@ Rectangle {
         RailButton {
             id: settingsBtn
             Layout.fillWidth: true
+            onYChanged: Qt.callLater(rail.updateHighlight) // layout moves it after rowH changes
             rowHeight: rail.rowH
             iconName: "gear"
             systemIcon: "preferences-system-symbolic"

@@ -3058,97 +3058,180 @@ ApplicationWindow {
         dialogWidth: 440
         property var all: []
         onOpened: all = JSON.parse(core.all_places_json() || "[]")
+        onClosed: customizePlacesList.finishDrag(false) // never leave a drag stuck
         Connections {
             target: core
             function onPlaces_jsonChanged() {
-                if (customizePlaces.visible)
+                // Mid-drag the rows must stay; finishDrag reloads on drop.
+                if (customizePlaces.visible && customizePlacesList.dragFrom < 0)
                     customizePlaces.all = JSON.parse(core.all_places_json() || "[]");
             }
         }
-        ListView {
+        // A Flickable + Column, not a ListView: ListView culls rows by their slot,
+        // which hid the dragged (translated) row while auto-scrolling.
+        Flickable {
             id: customizePlacesList
             Layout.fillWidth: true
-            Layout.preferredHeight: Math.min(380, contentHeight)
+            Layout.preferredHeight: Math.min(contentHeight, Math.max(220, window.height - 320))
             clip: true
-            model: customizePlaces.all
+            contentWidth: width
+            contentHeight: placesColumn.height
+            boundsBehavior: Flickable.StopAtBounds
             ScrollBar.vertical: ScrollBar {}
-            spacing: 4
+            interactive: dragFrom < 0
 
-            delegate: Rectangle {
-                id: placeRow
-                required property var modelData
-                required property int index
-                width: ListView.view.width
-                height: 40
-                radius: theme.radiusM
-                color: dragHandleArea.containsMouse ? theme.hoverOverlay : "transparent"
+            // Drag only moves rows on screen; the order is saved once on drop.
+            // Saving on every move rebuilt the model and killed the drag.
+            readonly property int pitch: 44 // row height + spacing
+            property int dragFrom: -1
+            property int dragTo: -1
+            property bool dragMoved: false // a plain click must not auto-scroll
+            property real dragDy: 0
+            property real pressY: 0   // pointer y in content coordinates at press
+            property real pointerY: 0 // pointer y in view coordinates
 
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: 8
-                    anchors.rightMargin: 8
-                    spacing: 10
-                    Item {
-                        width: 20; height: 32
-                        LoafIcon {
-                            anchors.centerIn: parent
-                            name: "dots-six-vertical"
-                            size: 16
-                            color: dragHandleArea.containsMouse ? theme.primary : theme.outline
+            function dragUpdate() {
+                var n = customizePlaces.all.length;
+                var dy = pointerY + contentY - pressY;
+                if (Math.abs(dy) > 4) dragMoved = true;
+                dragDy = Math.max(-dragFrom * pitch, Math.min((n - 1 - dragFrom) * pitch, dy));
+                dragTo = Math.round(dragFrom + dragDy / pitch);
+            }
+            function finishDrag(commit) {
+                var from = dragFrom, to = dragTo;
+                dragFrom = -1;
+                dragTo = -1;
+                dragDy = 0;
+                dragMoved = false;
+                if (from < 0) return;
+                if (commit && to !== from && from < customizePlaces.all.length)
+                    core.move_place(customizePlaces.all[from].id, to);
+                // Always reload: places_json doesn't change when only hidden rows move,
+                // and a reload skipped mid-drag must still land.
+                customizePlaces.all = JSON.parse(core.all_places_json() || "[]");
+            }
+
+            // Scroll while the dragged row is held near the top or bottom edge.
+            Timer {
+                interval: 16
+                repeat: true
+                running: customizePlacesList.dragFrom >= 0 && customizePlacesList.dragMoved
+                    && (customizePlacesList.pointerY < 32 || customizePlacesList.pointerY > customizePlacesList.height - 32)
+                onTriggered: {
+                    var v = customizePlacesList;
+                    var maxY = v.originY + Math.max(0, v.contentHeight - v.height);
+                    v.contentY = Math.max(v.originY, Math.min(maxY, v.contentY + (v.pointerY < 32 ? -8 : 8)));
+                    v.dragUpdate();
+                }
+            }
+
+            Column {
+                id: placesColumn
+                width: customizePlacesList.width
+                spacing: 4
+                Repeater {
+                    model: customizePlaces.all
+                    delegate: Rectangle {
+                        id: placeRow
+                        required property var modelData
+                        required property int index
+                        readonly property bool dragging: customizePlacesList.dragFrom === index
+                        // Rows between the drag start and target slide over to make room.
+                        readonly property real shift: {
+                            var f = customizePlacesList.dragFrom, t = customizePlacesList.dragTo, p = customizePlacesList.pitch;
+                            if (f < 0 || dragging) return 0;
+                            if (f < t && index > f && index <= t) return -p;
+                            if (f > t && index >= t && index < f) return p;
+                            return 0;
                         }
-                        MouseArea {
-                            id: dragHandleArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.SizeVerCursor
-                            property int startY: 0
-                            property int startIdx: -1
-                            onPressed: function(mouse) {
-                                startY = mouse.y;
-                                startIdx = placeRow.index;
+                        width: placesColumn.width
+                        height: 40
+                        z: dragging ? 2 : 0
+                        radius: theme.radiusM
+                        color: dragging ? theme.surfaceContainerHighest
+                            : (dragHandleArea.containsMouse ? theme.hoverOverlay : "transparent")
+                        border.width: dragging ? 1 : 0
+                        border.color: theme.primary
+                        scale: dragging ? 1.02 : 1
+                        Behavior on scale { enabled: theme.animate; NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+                        transform: Translate {
+                            y: placeRow.dragging ? customizePlacesList.dragDy : placeRow.shift
+                            Behavior on y {
+                                enabled: theme.animate && !placeRow.dragging
+                                NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
                             }
-                            onPositionChanged: function(mouse) {
-                                if (pressed) {
-                                    var pt = mapToItem(customizePlacesList.contentItem, mouse.x, mouse.y);
-                                    var targetIdx = Math.max(0, Math.min(customizePlaces.all.length - 1, Math.floor(pt.y / 44)));
-                                    if (targetIdx !== placeRow.index) {
-                                        core.move_place(placeRow.modelData.id, targetIdx);
+                        }
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 8
+                            anchors.rightMargin: 8
+                            spacing: 10
+                            Item {
+                                width: 20; height: 32
+                                LoafIcon {
+                                    anchors.centerIn: parent
+                                    name: "dots-six-vertical"
+                                    size: 16
+                                    color: dragHandleArea.containsMouse ? theme.primary : theme.outline
+                                }
+                                MouseArea {
+                                    id: dragHandleArea
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    preventStealing: true // else the Flickable takes the drag
+                                    cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+                                    onPressed: function(mouse) {
+                                        var v = customizePlacesList;
+                                        var y = mapToItem(v, mouse.x, mouse.y).y;
+                                        v.pointerY = y;
+                                        v.pressY = y + v.contentY;
+                                        v.dragDy = 0;
+                                        v.dragTo = placeRow.index;
+                                        v.dragFrom = placeRow.index;
                                     }
+                                    onPositionChanged: function(mouse) {
+                                        if (!pressed) return;
+                                        customizePlacesList.pointerY = mapToItem(customizePlacesList, mouse.x, mouse.y).y;
+                                        customizePlacesList.dragUpdate();
+                                    }
+                                    onReleased: customizePlacesList.finishDrag(true)
+                                    onCanceled: customizePlacesList.finishDrag(false)
                                 }
                             }
-                        }
-                    }
 
-                    LoafIcon {
-                        name: placeRow.modelData.icon || "folder"
-                        size: 16
-                        color: placeRow.modelData.hidden ? theme.outline : theme.primary
-                    }
+                            LoafIcon {
+                                name: placeRow.modelData.icon || "folder"
+                                size: 16
+                                color: placeRow.modelData.hidden ? theme.outline : theme.primary
+                            }
 
-                    Text {
-                        text: placeRow.modelData.name || ""
-                        color: placeRow.modelData.hidden ? theme.textMuted : theme.textMain
-                        font.pixelSize: theme.fs(13)
-                        Layout.fillWidth: true
-                        elide: Text.ElideRight
-                        opacity: placeRow.modelData.hidden ? 0.55 : 1.0
-                    }
-                    LoafButton {
-                        icon: placeRow.modelData.hidden ? "eye-slash" : "eye"
-                        variant: "text"
-                        Accessible.name: placeRow.modelData.hidden ? qsTr("Show in sidebar") : qsTr("Hide from sidebar")
-                        onClicked: core.set_place_hidden(placeRow.modelData.id, !placeRow.modelData.hidden)
-                    }
-                    LoafButton {
-                        icon: "trash"
-                        variant: "text"
-                        enabled: placeRow.modelData.kind === "bookmark" || (placeRow.modelData.id && placeRow.modelData.id.indexOf("bookmark:") === 0)
-                        Accessible.name: qsTr("Remove bookmark")
-                        onClicked: {
-                            if (placeRow.modelData.path)
-                                core.remove_bookmark(placeRow.modelData.path);
-                            else
-                                core.set_place_hidden(placeRow.modelData.id, true);
+                            Text {
+                                text: placeRow.modelData.name || ""
+                                color: placeRow.modelData.hidden ? theme.textMuted : theme.textMain
+                                font.pixelSize: theme.fs(13)
+                                Layout.fillWidth: true
+                                elide: Text.ElideRight
+                                opacity: placeRow.modelData.hidden ? 0.55 : 1.0
+                            }
+                            LoafButton {
+                                icon: placeRow.modelData.hidden ? "eye-slash" : "eye"
+                                variant: "text"
+                                Accessible.name: placeRow.modelData.hidden ? qsTr("Show in sidebar") : qsTr("Hide from sidebar")
+                                onClicked: core.set_place_hidden(placeRow.modelData.id, !placeRow.modelData.hidden)
+                            }
+                            LoafButton {
+                                icon: "trash"
+                                variant: "text"
+                                enabled: placeRow.modelData.kind === "bookmark" || (placeRow.modelData.id && placeRow.modelData.id.indexOf("bookmark:") === 0)
+                                Accessible.name: qsTr("Remove bookmark")
+                                onClicked: {
+                                    if (placeRow.modelData.path)
+                                        core.remove_bookmark(placeRow.modelData.path);
+                                    else
+                                        core.set_place_hidden(placeRow.modelData.id, true);
+                                }
+                            }
                         }
                     }
                 }

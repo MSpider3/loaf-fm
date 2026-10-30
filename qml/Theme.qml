@@ -61,6 +61,7 @@ Item {
     property string contextMenuMode: "full" // "full", "minimal", "custom"
     property var disabledMenuItems: ({})
     property bool hideTrashWhenEmpty: true
+    property string sidebarSize: "fit" // "fit", "comfortable", "compact"
     property string toolbarOperations: "auto" // "auto", "always", "hidden" -- back/forward buttons
     property bool showNewTabButton: true
     property bool showNewWindowButton: true
@@ -2123,6 +2124,8 @@ Item {
         }
         value = readSetting("hideTrashWhenEmpty");
         if (value.length > 0) hideTrashWhenEmpty = (value === "true");
+        value = readSetting("sidebarSize");
+        if (value === "fit" || value === "comfortable" || value === "compact") sidebarSize = value;
         value = readSetting("toolbarOperations");
         if (value.length > 0) toolbarOperations = value;
         value = readSetting("showNewTabButton");
@@ -2182,6 +2185,7 @@ Item {
     onContextMenuModeChanged: writeSetting("contextMenuMode", contextMenuMode)
     onDisabledMenuItemsChanged: writeSetting("disabledMenuItems", JSON.stringify(disabledMenuItems))
     onHideTrashWhenEmptyChanged: writeSetting("hideTrashWhenEmpty", hideTrashWhenEmpty)
+    onSidebarSizeChanged: writeSetting("sidebarSize", sidebarSize)
     onToolbarOperationsChanged: writeSetting("toolbarOperations", toolbarOperations)
     onShowNewTabButtonChanged: writeSetting("showNewTabButton", showNewTabButton ? "true" : "false")
     onShowNewWindowButtonChanged: writeSetting("showNewWindowButton", showNewWindowButton ? "true" : "false")
