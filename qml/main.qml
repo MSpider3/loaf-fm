@@ -228,6 +228,51 @@ ApplicationWindow {
             afterCutPaste();
     }
 
+    // ---- drives (shared by the sidebar and This PC) ----------------------
+
+    // Opens a drive; an unmounted one is mounted first (a locked one asks
+    // for its passphrase) and opened when the mount finishes.
+    function openDrive(d, inNewTab) {
+        if (!d)
+            return;
+        if (d.is_mounted && d.mount_point) {
+            if (inNewTab) {
+                newTab(d.mount_point);
+                return;
+            }
+            showFiles();
+            searchInput.text = "";
+            engine.set_path(d.mount_point);
+            return;
+        }
+        pendingDriveOpen = d.device;
+        mountDrive(d);
+    }
+
+    function mountDrive(d) {
+        if (d.is_locked)
+            core.unlock_drive(d.device, "", false); // keyring first, then asks
+        else
+            core.mount_drive(d.device);
+    }
+
+    function openDriveMenu(d, x, y) {
+        var mounted = d.is_mounted === true;
+        var m = [];
+        m.push({ text: qsTr("Open"), icon: "folder-open", action: function() { window.openDrive(d, false); } });
+        m.push({ text: qsTr("Open in New Tab"), icon: "tabs", enabled: mounted, action: function() { window.openDrive(d, true); } });
+        if (!mounted)
+            m.push({ text: qsTr("Mount"), icon: "download", separatorBefore: true, action: function() { window.mountDrive(d); } });
+        else
+            m.push({ text: qsTr("Unmount"), icon: "eject", separatorBefore: true, action: function() { core.unmount_drive(d.device); } });
+        if (d.is_external && d.disk)
+            m.push({ text: qsTr("Eject (Safely Remove)"), icon: "eject", action: function() { core.eject_drive(d.disk); } });
+        if (d.is_encrypted && d.crypt_device && !mounted)
+            m.push({ text: qsTr("Lock Encrypted Drive"), icon: "lock", action: function() { core.lock_drive(d.crypt_device); } });
+        contextMenu.model = m;
+        contextMenu.openAt(x, y);
+    }
+
     // Copy or move for a drop. Like Nautilus: onto another drive copies
     // (the source stays on the USB stick), on the same drive moves; Ctrl at
     // drag start forces a copy. Outside drags follow the other app's choice.
@@ -1512,8 +1557,14 @@ ApplicationWindow {
                         if (places[i].path && places[i].path === engine.current_path)
                             return places[i].id;
                     }
+                    for (var j = 0; j < drives.length; ++j) {
+                        if (drives[j].is_mounted && drives[j].mount_point === engine.current_path)
+                            return "device:" + drives[j].device;
+                    }
                     return "";
                 }
+                onDriveClicked: function(drive, inNewTab) { window.openDrive(drive, inNewTab); }
+                onDriveMenuRequested: function(drive, x, y) { window.openDriveMenu(drive, x, y); }
                 onPlaceClicked: function(place, inNewTab) {
                     if (place.kind === "pc") {
                         if (inNewTab) {

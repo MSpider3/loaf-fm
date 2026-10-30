@@ -17,6 +17,8 @@ Rectangle {
     signal settingsClicked()
     signal placeMenuRequested(var place, real x, real y)
     signal sidebarMenuRequested(real x, real y)
+    signal driveClicked(var drive, bool newTab)
+    signal driveMenuRequested(var drive, real x, real y)
 
     readonly property var places: {
         try {
@@ -24,6 +26,55 @@ Rectangle {
         } catch (e) {
             return [];
         }
+    }
+
+    // Drives and partitions, mounted or not (the system partition is This PC).
+    readonly property var drives: {
+        try {
+            return JSON.parse(core.drives_json || "[]").filter(function(d) {
+                return d.mount_point !== "/" && d.mount_point !== "/home" && d.mount_point.indexOf("/boot") !== 0;
+            });
+        } catch (e) {
+            return [];
+        }
+    }
+
+    // Places, then folders and bookmarks, then drives (same entry shape as
+    // the devices sidebar in PR #70: kind "device", id "device:<dev>").
+    readonly property var entries: places.filter(function(p) { return p.id !== "trash"; }).concat(
+        drives.map(function(d) {
+            return { id: "device:" + d.device, kind: "device", name: d.name,
+                     icon: d.is_external ? "usb" : "hard-drive",
+                     system_icon: d.is_external ? "drive-removable-media" : "drive-harddisk",
+                     path: d.mount_point, drive: d };
+        }))
+
+    // Which divider group an entry belongs to; a thin line separates groups.
+    function groupOf(e) {
+        if (e.kind === "device")
+            return "drives";
+        if (e.kind === "pc" || e.kind === "recent" || e.kind === "starred" || e.id === "home")
+            return "places";
+        return "folders";
+    }
+    function startsGroup(i) {
+        return i > 0 && groupOf(entries[i]) !== groupOf(entries[i - 1]);
+    }
+    readonly property int dividerCount: {
+        var n = 0;
+        for (var i = 1; i < entries.length; ++i)
+            if (startsGroup(i)) ++n;
+        return n;
+    }
+    readonly property int dividerHeight: 9
+    readonly property int rowSpacing: 4
+
+    // Rows shrink (44 -> 32 px) so everything fits without scrolling, like
+    // Nautilus; only a very short window still scrolls.
+    readonly property int rowH: {
+        var n = Math.max(1, entries.length);
+        var avail = placeList.height - dividerCount * dividerHeight - (n - 1) * rowSpacing - 8;
+        return Math.max(32, Math.min(44, Math.floor(avail / n)));
     }
 
     readonly property var trashPlace: {
@@ -63,8 +114,8 @@ Rectangle {
         z: 1
         x: 12
         width: rail.expanded ? (rail.width - 24) : 44
-        height: 44
-        radius: 22
+        height: rail.rowH
+        radius: height / 2
         color: theme.primaryContainer
         visible: opacity > 0.01
         opacity: targetY >= 0 ? 1.0 : 0.0
@@ -105,7 +156,7 @@ Rectangle {
             if (filtered[i].id === rail.activeId) {
                 var it = placeList.itemAtIndex(i);
                 if (it) {
-                    var p = it.mapToItem(rail, 0, 0);
+                    var p = it.button.mapToItem(rail, 0, 0);
                     selectionHighlight.targetY = p.y;
                     return;
                 }
@@ -117,6 +168,8 @@ Rectangle {
     onActiveIdChanged: Qt.callLater(updateHighlight)
     onShowTrashChanged: Qt.callLater(updateHighlight)
     onExpandedChanged: Qt.callLater(updateHighlight)
+    onRowHChanged: Qt.callLater(updateHighlight)
+    onDrivesChanged: Qt.callLater(updateHighlight)
 
     ColumnLayout {
         anchors.fill: parent
@@ -232,47 +285,83 @@ Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
-            spacing: 6
+            spacing: rail.rowSpacing
             boundsBehavior: Flickable.StopAtBounds
-            model: rail.places.filter(function(p) { return p.id !== "trash"; })
+            model: rail.entries
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded; width: 6 }
 
             onContentYChanged: rail.updateHighlight()
             onCountChanged: Qt.callLater(rail.updateHighlight)
             Component.onCompleted: Qt.callLater(rail.updateHighlight)
 
-            delegate: RailButton {
-                width: placeList.width
+            delegate: Item {
+                id: entry
                 required property var modelData
                 required property int index
-                iconName: modelData.icon
-                systemIcon: modelData.system_icon
-                label: modelData.name
-                showLabel: rail.expanded
-                selected: rail.activeId === modelData.id
-                dimmed: modelData.missing === true || (modelData.kind === "smb" && modelData.connected !== true)
-                dropPath: (modelData.kind === "place" || modelData.kind === "bookmark" || (modelData.kind === "smb" && modelData.connected === true)) ? modelData.path : ""
-                accessibleName: modelData.name
-                onClicked: rail.placeClicked(modelData, false)
-                onMiddleClicked: rail.placeClicked(modelData, true)
-                onMenuRequested: function(x, y) { rail.placeMenuRequested(modelData, x, y); }
-                onFilesDropped: function(paths, asCopy, d) {
-                    if (dragManager.isRmb) {
-                        var pt = mapToItem(window.contentItem, d.x, d.y);
-                        rmbDropMenu.showAt(pt.x, pt.y, paths, modelData.kind === "trash" ? "trash" : dropPath);
-                    } else if (modelData.kind === "trash") {
-                        core.trash_items(JSON.stringify(paths));
-                    } else if (dropPath.length > 0) {
-                        window.handleDrop(paths, dropPath, asCopy);
+                readonly property bool isDevice: modelData.kind === "device"
+                readonly property bool divided: rail.startsGroup(index)
+                property alias button: entryButton
+                width: placeList.width
+                height: rail.rowH + (divided ? rail.dividerHeight : 0)
+
+                // Thin line between groups (no headings, like Nautilus).
+                Rectangle {
+                    visible: entry.divided
+                    x: 14; width: parent.width - 28; height: 1
+                    y: Math.floor((rail.dividerHeight - 1) / 2)
+                    color: theme.separator
+                    opacity: 0.45
+                }
+
+                RailButton {
+                    id: entryButton
+                    anchors.bottom: parent.bottom
+                    width: parent.width
+                    rowHeight: rail.rowH
+                    iconName: entry.modelData.icon
+                    systemIcon: entry.modelData.system_icon
+                    label: entry.modelData.name
+                    showLabel: rail.expanded
+                    selected: rail.activeId === entry.modelData.id
+                    dimmed: !entry.isDevice && (entry.modelData.missing === true || (entry.modelData.kind === "smb" && entry.modelData.connected !== true))
+                    dropPath: entry.isDevice ? (entry.modelData.drive.is_mounted ? entry.modelData.path : "")
+                        : ((entry.modelData.kind === "place" || entry.modelData.kind === "bookmark" || (entry.modelData.kind === "smb" && entry.modelData.connected === true)) ? entry.modelData.path : "")
+                    accessibleName: label + (entry.isDevice && !entry.modelData.drive.is_mounted ? " (" + qsTr("not mounted") + ")" : "")
+                    // Mounted drives get an eject (removable) or unmount button, like Nautilus.
+                    trailingIcon: entry.isDevice && entry.modelData.drive.is_mounted ? "eject" : ""
+                    trailingTip: entry.isDevice && entry.modelData.drive.is_external ? qsTr("Eject") : qsTr("Unmount")
+                    onTrailingClicked: {
+                        var d = entry.modelData.drive;
+                        if (d.is_external && d.disk)
+                            core.eject_drive(d.disk);
+                        else
+                            core.unmount_drive(d.device);
+                    }
+                    onClicked: entry.isDevice ? rail.driveClicked(entry.modelData.drive, false) : rail.placeClicked(entry.modelData, false)
+                    onMiddleClicked: entry.isDevice ? rail.driveClicked(entry.modelData.drive, true) : rail.placeClicked(entry.modelData, true)
+                    onMenuRequested: function(x, y) {
+                        if (entry.isDevice)
+                            rail.driveMenuRequested(entry.modelData.drive, x, y);
+                        else
+                            rail.placeMenuRequested(entry.modelData, x, y);
+                    }
+                    onFilesDropped: function(paths, asCopy, d) {
+                        if (dropPath.length === 0)
+                            return;
+                        if (dragManager.isRmb) {
+                            var pt = mapToItem(window.contentItem, d.x, d.y);
+                            rmbDropMenu.showAt(pt.x, pt.y, paths, dropPath);
+                        } else {
+                            window.handleDrop(paths, dropPath, asCopy);
+                        }
                     }
                 }
-                acceptsTrashDrop: modelData.kind === "trash"
             }
 
             // Drop a folder on the empty part of the rail to bookmark it.
             footer: Item {
                 width: placeList.width
-                height: 48
+                height: 24
                 DropArea {
                     anchors.fill: parent
                     keys: ["text/uri-list"]
@@ -305,7 +394,7 @@ Rectangle {
         Item {
             id: trashContainer
             Layout.fillWidth: true
-            Layout.preferredHeight: rail.showTrash ? 44 : 0
+            Layout.preferredHeight: rail.showTrash ? rail.rowH : 0
             visible: Layout.preferredHeight > 0.01
             clip: true
             opacity: rail.showTrash ? 1.0 : 0.0
@@ -316,6 +405,7 @@ Rectangle {
             RailButton {
                 id: trashButton
                 anchors.fill: parent
+                rowHeight: rail.rowH
                 iconName: "trash"
                 systemIcon: "user-trash-symbolic"
                 label: qsTr("Trash")
@@ -340,6 +430,7 @@ Rectangle {
         RailButton {
             id: settingsBtn
             Layout.fillWidth: true
+            rowHeight: rail.rowH
             iconName: "gear"
             systemIcon: "preferences-system-symbolic"
             label: qsTr("Settings")
@@ -362,14 +453,19 @@ Rectangle {
         property string dropPath: ""
         property bool acceptsTrashDrop: false
         property string accessibleName: label
+        property real rowHeight: 44
+        // Optional small action at the end of the row (eject a drive).
+        property string trailingIcon: ""
+        property string trailingTip: ""
+        signal trailingClicked()
 
         signal clicked()
         signal middleClicked()
         signal menuRequested(real x, real y)
         signal filesDropped(var paths, bool asCopy, var dropEvent)
 
-        implicitHeight: 44
-        height: 44
+        implicitHeight: rowHeight
+        height: rowHeight
         scale: mouse.pressed ? 0.95 : (mouse.containsMouse ? 1.02 : 1.0)
         Behavior on scale { enabled: theme.animate; SpringAnimation { spring: 4.0; damping: 0.3 } }
         Accessible.role: Accessible.Button
@@ -381,8 +477,8 @@ Rectangle {
         Rectangle {
             x: 12
             width: btn.showLabel ? btn.width - 24 : 44
-            height: 44
-            radius: 22
+            height: btn.rowHeight
+            radius: height / 2
             color: btn.dropHover ? theme.primaryContainer
                 : (mouse.containsMouse && !btn.selected ? theme.hoverOverlay : "transparent")
             border.width: btn.dropHover ? 2 : 0
@@ -395,7 +491,7 @@ Rectangle {
             id: iconBox
             x: 12
             width: 44
-            height: 44
+            height: btn.rowHeight
             opacity: btn.dimmed ? 0.45 : 1.0
             scale: mouse.pressed ? 0.88 : (mouse.containsMouse ? 1.10 : 1.0)
             Behavior on scale { enabled: theme.animate; SpringAnimation { spring: 4.5; damping: 0.3 } }
@@ -423,7 +519,7 @@ Rectangle {
             anchors.left: iconBox.right
             anchors.leftMargin: 6
             anchors.right: parent.right
-            anchors.rightMargin: 16
+            anchors.rightMargin: btn.trailingIcon.length > 0 ? 16 + btn.rowHeight : 16
             anchors.verticalCenter: parent.verticalCenter
             visible: opacity > 0.01
             opacity: btn.showLabel ? (btn.dimmed ? 0.5 : 1.0) : 0.0
@@ -477,6 +573,42 @@ Rectangle {
                     btn.clicked();
                 }
             }
+        }
+
+        // Round tonal button (Material 3) for the row's trailing action.
+        Rectangle {
+            id: trailing
+            visible: btn.showLabel && btn.trailingIcon.length > 0
+            anchors.right: parent.right
+            anchors.rightMargin: 16
+            anchors.verticalCenter: parent.verticalCenter
+            width: btn.rowHeight - 8
+            height: width
+            radius: width / 2
+            color: trailingMouse.containsMouse ? theme.secondaryContainer : "transparent"
+            scale: trailingMouse.pressed ? 0.88 : 1.0
+            Behavior on color { enabled: theme.animate; ColorAnimation { duration: theme.durationFast } }
+            Behavior on scale { enabled: theme.animate; NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
+            Accessible.role: Accessible.Button
+            Accessible.name: btn.trailingTip + " " + btn.label
+            Accessible.onPressAction: btn.trailingClicked()
+
+            LoafIcon {
+                anchors.centerIn: parent
+                name: btn.trailingIcon || "eject"
+                size: 16
+                color: trailingMouse.containsMouse ? theme.secondaryContainerFg : theme.textMuted
+            }
+            MouseArea {
+                id: trailingMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: btn.trailingClicked()
+            }
+            ToolTip.visible: trailingMouse.containsMouse
+            ToolTip.text: btn.trailingTip
+            ToolTip.delay: 500
         }
     }
 }
