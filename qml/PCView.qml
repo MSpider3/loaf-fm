@@ -202,6 +202,7 @@ Item {
             window.showFiles();
             engine.set_path(d.mount_point);
         } else {
+            window.pendingDriveOpen = d.device;
             pcView.mountDrive(d);
         }
     }

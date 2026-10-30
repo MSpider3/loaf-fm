@@ -107,6 +107,9 @@ pub mod qobject {
         fn go_forward(self: Pin<&mut LoafEngine>);
         #[qinvokable]
         fn refresh(self: Pin<&mut LoafEngine>);
+        /// Drops rows whose file is gone (search results after a move/delete).
+        #[qinvokable]
+        fn prune_missing(self: Pin<&mut LoafEngine>);
         #[qinvokable]
         fn open_trash(self: Pin<&mut LoafEngine>);
         #[qinvokable]
@@ -240,7 +243,9 @@ impl Loc {
         if !path.is_absolute() {
             return None;
         }
-        if path.is_dir() {
+        // Don't stat on a network mount here (UI thread; a dead server hangs
+        // it): the scan worker reports a missing folder instead.
+        if util::on_network_fs(&path) || path.is_dir() {
             return Some(Loc::Dir(path));
         }
         if path.is_file() && archive::is_archive(&path) {
@@ -851,12 +856,20 @@ impl qobject::LoafEngine {
         self.jump(true);
     }
 
+    pub fn prune_missing(mut self: Pin<&mut Self>) {
+        let before = self.all.len();
+        self.as_mut().rust_mut().all.retain(|e| std::fs::symlink_metadata(&e.path).is_ok());
+        if self.all.len() != before {
+            self.refilter(false);
+        }
+    }
+
     pub fn refresh(self: Pin<&mut Self>) {
         match self.loc.clone() {
             Loc::Search { root, query, contents } => {
                 self.run_search(root, query, contents);
             }
-            Loc::Dir(p) if !p.is_dir() => {
+            Loc::Dir(p) if !util::on_network_fs(&p) && !p.is_dir() => {
                 // The folder vanished: go to the nearest existing parent.
                 let mut up = p.clone();
                 while !up.is_dir() {

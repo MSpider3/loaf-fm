@@ -25,6 +25,7 @@ ApplicationWindow {
     property bool settingsOpened: false
     property bool pcOpened: false
     property int settingsTab: 0
+    property string pendingDriveOpen: ""
     onActiveViewChanged: {
         if (activeView === "settings") settingsOpened = true;
         else if (activeView === "pc") pcOpened = true;
@@ -93,6 +94,15 @@ ApplicationWindow {
                    : theme.iconSource === "custom" ? theme.customIconTheme
                    : "system";
         return core.resolve_icon(source, name);
+    }
+
+    // A .desktop file shows the app's own icon (its Icon= key), like Nautilus.
+    function desktopIcon(path) {
+        void core.icon_theme;
+        var source = theme.iconSource === "adwaita" ? "adwaita"
+                   : theme.iconSource === "custom" ? theme.customIconTheme
+                   : "system";
+        return core.desktop_icon(path, source);
     }
 
     function urlsToPaths(urls) {
@@ -216,6 +226,15 @@ ApplicationWindow {
         core.transfer(JSON.stringify(paths), dest, mode, "rename");
         if (fromCut)
             afterCutPaste();
+    }
+
+    // Copy or move for a drop. Like Nautilus: onto another drive copies
+    // (the source stays on the USB stick), on the same drive moves; Ctrl at
+    // drag start forces a copy. Outside drags follow the other app's choice.
+    function dropIsCopy(drop, paths, dest) {
+        if (drop.source === dragProxy)
+            return dragManager.asCopy || (dest.length > 0 && !core.same_device(paths[0], dest));
+        return drop.proposedAction === Qt.CopyAction || !(drop.supportedActions & Qt.MoveAction);
     }
 
     function handleDrop(paths, destDir, asCopy) {
@@ -510,6 +529,13 @@ ApplicationWindow {
 
     // Paths from the command line or D-Bus (another `loaf`, a browser's
     // "Show in folder", ...).
+    // `loaf trash:///` (and recent:, starred:) open those views like folders.
+    function openTargetInfo(p) {
+        if (/^(trash|recent|starred):/.test(p))
+            return { exists: true, is_dir: true, parent: p };
+        return JSON.parse(core.get_item_info(p) || "{}");
+    }
+
     function handleOpenRequest(paths, mode) {
         if (mode === "window" || paths.length === 0) {
             window.raise();
@@ -525,7 +551,7 @@ ApplicationWindow {
         var props = [];
         for (var i = 0; i < paths.length; ++i) {
             var p = paths[i];
-            var info = JSON.parse(core.get_item_info(p) || "{}");
+            var info = window.openTargetInfo(p);
             if (!info.exists)
                 continue;
             if (mode === "properties") {
@@ -571,7 +597,7 @@ ApplicationWindow {
         var first = !restored;
         for (var i = 0; i < pending.length; ++i) {
             var p = pending[i];
-            var info = JSON.parse(core.get_item_info(p) || "{}");
+            var info = window.openTargetInfo(p);
             if (!info.exists)
                 continue;
             var dir = info.is_dir ? p : info.parent;
@@ -611,7 +637,7 @@ ApplicationWindow {
     Shortcut { sequence: "Delete"; enabled: window.gridKeyboardReady; onActivated: window.trashSelection() }
     Shortcut { sequence: "Shift+Delete"; enabled: window.gridKeyboardReady; onActivated: window.deleteSelection() }
     Shortcut {
-        sequences: ["Alt+Left", StandardKey.Back]
+        sequences: ["Alt+Left", "Back"]
         enabled: !window.anyModalOpen && (engine.can_go_back || window.isAuxView || engine.is_searching_everywhere)
         onActivated: {
             if (engine.is_searching_everywhere) {
@@ -625,7 +651,7 @@ ApplicationWindow {
         }
     }
     Shortcut {
-        sequences: ["Alt+Right", StandardKey.Forward]
+        sequences: ["Alt+Right", "Forward"]
         enabled: !window.anyModalOpen && engine.can_go_forward && !window.isAuxView && !engine.is_searching_everywhere
         onActivated: engine.go_forward()
     }
@@ -641,8 +667,10 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+Shift+N"; enabled: !window.anyModalOpen; onActivated: window.startNewFolder() }
     Shortcut { sequence: "F3"; onActivated: window.toggleSplit() }
     Shortcut { sequence: "F9"; onActivated: sidebar.expanded = !sidebar.expanded }
-    Shortcut { sequences: ["Ctrl+=", "Ctrl++", StandardKey.ZoomIn]; onActivated: theme.stepZoom(1) }
-    Shortcut { sequences: ["Ctrl+-", StandardKey.ZoomOut]; onActivated: theme.stepZoom(-1) }
+    // Each key listed once: StandardKey.ZoomIn/ZoomOut *are* Ctrl++ / Ctrl+-,
+    // and a sequence registered twice is "ambiguous" and never fires.
+    Shortcut { sequences: ["Ctrl+=", "Ctrl++"]; onActivated: theme.stepZoom(1) }
+    Shortcut { sequences: ["Ctrl+-", "Ctrl+_"]; onActivated: theme.stepZoom(-1) }
     Shortcut { sequence: "Ctrl+0"; onActivated: theme.zoomIndex = 2 }
     Shortcut { sequence: "Ctrl+1"; onActivated: engine.set_view("grid") }
     Shortcut { sequence: "Ctrl+2"; onActivated: engine.set_view("list") }
@@ -653,7 +681,13 @@ ApplicationWindow {
         enabled: window.gridKeyboardReady
         onActivated: {
             var p = window.selectedPaths();
-            window.showProperties(p.length > 0 ? p : [engine.current_path]);
+            if (p.length === 0) {
+                // Trash, Recent, Search…: there's no real folder, so summarize
+                // what is shown (count and total size) instead of a bogus "trash:".
+                p = engine.location_kind === "dir" ? [engine.current_path]
+                    : (engine.item_count > 0 ? JSON.parse(engine.paths_in_range(0, engine.item_count - 1)) : []);
+            }
+            window.showProperties(p);
         }
     }
     Shortcut { sequence: "Ctrl+Q"; onActivated: window.close() }
@@ -686,6 +720,9 @@ ApplicationWindow {
                 } else if (engine.is_searching_everywhere) {
                     engine.clear_search();
                     searchInput.text = "";
+                } else if (engine.filter_text.length > 0) {
+                    searchInput.text = "";
+                    engine.set_filter("");
                 } else if (window.isAuxView) {
                     window.showFiles();
                 }
@@ -707,6 +744,10 @@ ApplicationWindow {
                 case Qt.Key_Right:
                     if (!pane.isList()) { window.keyboardNavActive = true; pane.moveSelection(1, 0, shift); event.accepted = true; return; }
                     break;
+                case Qt.Key_PageUp:
+                    window.keyboardNavActive = true; pane.moveSelection(0, -pane.pageRows(), shift); event.accepted = true; return;
+                case Qt.Key_PageDown:
+                    window.keyboardNavActive = true; pane.moveSelection(0, pane.pageRows(), shift); event.accepted = true; return;
                 case Qt.Key_Home:
                     window.keyboardNavActive = true; pane.selectRow(0, false, shift); pane.ensureVisible(0); event.accepted = true; return;
                 case Qt.Key_End:
@@ -747,6 +788,12 @@ ApplicationWindow {
             }
             if (r && r.reload_drives)
                 core.load_drives();
+            // A drive clicked while unmounted opens as soon as it is mounted.
+            if (ok && r && r.mounted && r.device === window.pendingDriveOpen) {
+                window.pendingDriveOpen = "";
+                window.showFiles();
+                engine.set_path(r.mounted);
+            }
             if (r && r.created && r.created.length > 0) {
                 // Select what was just created in the pane showing its folder.
                 var parent = r.created[0].substring(0, r.created[0].lastIndexOf("/"));
@@ -758,7 +805,9 @@ ApplicationWindow {
             var kinds = pane1Loader.item ? [pane0, pane1Loader.item] : [pane0];
             for (var i = 0; i < kinds.length; ++i) {
                 var lk = kinds[i].engine.location_kind;
-                if (lk !== "dir" && lk !== "search")
+                if (lk === "search")
+                    kinds[i].engine.prune_missing(); // re-searching would lose the scroll position
+                else if (lk !== "dir")
                     kinds[i].engine.refresh();
             }
         }
@@ -1100,7 +1149,7 @@ ApplicationWindow {
                                     var paths = window.urlsToPaths(drop.urls).filter(function(p) { return p !== dest; });
                                     if (paths.length === 0)
                                         return;
-                                    var asCopy = (drop.source === dragProxy) ? dragManager.asCopy : (drop.proposedAction === Qt.CopyAction);
+                                    var asCopy = window.dropIsCopy(drop, paths, dest);
                                     drop.accept(asCopy ? Qt.CopyAction : Qt.MoveAction);
                                     if (dragManager.isRmb) {
                                         var pt = chipDrop.mapToItem(window.contentItem, drop.x, drop.y);

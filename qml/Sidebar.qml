@@ -455,7 +455,7 @@ Rectangle {
                 var paths = window.urlsToPaths(d.urls);
                 if (paths.length === 0)
                     return;
-                var asCopy = (d.source === dragProxy) ? dragManager.asCopy : (d.proposedAction === Qt.CopyAction);
+                var asCopy = window.dropIsCopy(d, paths, btn.dropPath);
                 d.accept(asCopy ? Qt.CopyAction : Qt.MoveAction);
                 btn.filesDropped(paths, asCopy, d);
             }

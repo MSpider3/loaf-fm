@@ -46,6 +46,12 @@ static QStringList toLocalPaths(const QStringList &items)
     for (const QString &item : items) {
         if (item.isEmpty())
             continue;
+        // Loaf's own views (trash:///, recent:///, starred:///) pass through.
+        if (item.startsWith(QLatin1String("trash:")) || item.startsWith(QLatin1String("recent:"))
+            || item.startsWith(QLatin1String("starred:"))) {
+            out << item;
+            continue;
+        }
         const QUrl url = item.startsWith(QLatin1Char('/')) ? QUrl::fromLocalFile(item) : QUrl::fromUserInput(item);
         if (url.isLocalFile())
             out << QFileInfo(url.toLocalFile()).absoluteFilePath();
