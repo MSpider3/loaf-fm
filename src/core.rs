@@ -769,11 +769,19 @@ impl qobject::LoafCore {
     /// Watches every trash folder so emptying or trashing from another app
     /// (Nautilus) shows up here too. Re-run when drives are (un)mounted.
     fn watch_trash(self: Pin<&mut Self>) {
+        static GENERATION: AtomicU64 = AtomicU64::new(0);
+        let gen = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
         let thread = self.qt_thread();
         // Finding the trash folders stats every mount: keep it off the UI thread.
         std::thread::spawn(move || {
             let dirs = trash::all_trash_dirs();
             let _ = thread.queue(move |mut core| {
+                // A slower, older scan must not replace a newer list.
+                if GENERATION.load(Ordering::SeqCst) != gen {
+                    return;
+                }
+                // Free the old inotify instances first (per-user limit).
+                core.as_mut().rust_mut().trash_watchers.clear();
                 let mut watchers = Vec::new();
                 for dir in dirs {
                     let t = core.qt_thread();
@@ -1641,8 +1649,11 @@ impl qobject::LoafCore {
 
     pub fn same_device(&self, a: &QString, b: &QString) -> bool {
         use std::os::unix::fs::MetadataExt;
-        let dev = |p: &QString| std::fs::symlink_metadata(p.to_string()).map(|m| m.dev()).ok();
-        matches!((dev(a), dev(b)), (Some(x), Some(y)) if x == y)
+        // The dragged item itself (a link is moved as a link), but the
+        // folder it lands in followed through links (~/Stick -> USB drive).
+        let a = std::fs::symlink_metadata(a.to_string()).map(|m| m.dev()).ok();
+        let b = std::fs::metadata(b.to_string()).map(|m| m.dev()).ok();
+        matches!((a, b), (Some(x), Some(y)) if x == y)
     }
 
     pub fn mime_type(&self, path: &QString) -> QString {
@@ -2316,6 +2327,7 @@ fn run_transfer(op: &Op, sources: Vec<PathBuf>, dest: PathBuf, mode: &str, res: 
     let mut pairs: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     let mut skipped = 0;
+    let mut merged = 0;
     for src in &sources {
         if op.cancelled() {
             break;
@@ -2333,9 +2345,11 @@ fn run_transfer(op: &Op, sources: Vec<PathBuf>, dest: PathBuf, mode: &str, res: 
         let exists = std::fs::symlink_metadata(&plain).is_ok();
         // Merge: folder onto folder combines them; other clashes keep both.
         let both_dirs = exists && plain.is_dir() && src.is_dir() && !plain.is_symlink() && !src.is_symlink();
-        if res == "merge" && both_dirs && mode != "link" {
+        if res == "merge" && both_dirs && mode != "link" && !same_dir {
+            // No undo pair: undoing a "copy" of the merged folder would trash
+            // the whole destination. Counted so the drive still gets synced.
             match fsops::merge_into(src, &plain, mode == "move", op) {
-                Ok(()) => {}
+                Ok(()) => merged += 1,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => break,
                 Err(e) => errors.push(format!("{}: {}", name, e)),
             }
@@ -2376,7 +2390,7 @@ fn run_transfer(op: &Op, sources: Vec<PathBuf>, dest: PathBuf, mode: &str, res: 
     if mode == "move" && !pairs.is_empty() {
         xdg::move_starred(&pairs);
     }
-    if mode != "link" && !pairs.is_empty() && needs_sync(&dest) {
+    if mode != "link" && (!pairs.is_empty() || merged > 0) && needs_sync(&dest) {
         *util::lock(&op.current) = "Writing to the drive…".into();
         op.publish_soon();
         fsops::sync_filesystem(&dest);
@@ -2390,6 +2404,9 @@ fn run_transfer(op: &Op, sources: Vec<PathBuf>, dest: PathBuf, mode: &str, res: 
     };
     let mut o = if errors.is_empty() {
         let mut msg = if n == 0 { String::new() } else { format!("{} {}", verb, plural(n, "item", "items")) };
+        if merged > 0 {
+            msg.push_str(&format!("{}Merged {}", if msg.is_empty() { "" } else { ", " }, plural(merged, "folder", "folders")));
+        }
         if skipped > 0 {
             msg.push_str(&format!("{}{} skipped", if msg.is_empty() { "" } else { ", " }, skipped));
         }

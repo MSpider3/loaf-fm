@@ -21,6 +21,9 @@ const DIR_MASK: u32 = libc::IN_CREATE
     | libc::IN_MOVED_FROM
     | libc::IN_MOVED_TO
     | libc::IN_CLOSE_WRITE
+    // No IN_MODIFY: it fires for every write while a file grows (downloads),
+    // rescanning the folder nonstop. Trade-off: a file still being written
+    // shows its new size once it is closed.
     | libc::IN_ATTRIB
     | libc::IN_DELETE_SELF
     | libc::IN_MOVE_SELF;

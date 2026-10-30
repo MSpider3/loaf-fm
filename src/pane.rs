@@ -858,7 +858,12 @@ impl qobject::LoafEngine {
 
     pub fn prune_missing(mut self: Pin<&mut Self>) {
         let before = self.all.len();
-        self.as_mut().rust_mut().all.retain(|e| std::fs::symlink_metadata(&e.path).is_ok());
+        // Never stat results on network mounts here (UI thread).
+        let mounts = util::mount_table();
+        self.as_mut().rust_mut().all.retain(|e| {
+            let p = Path::new(&e.path);
+            util::on_network_fs_in(p, &mounts) || std::fs::symlink_metadata(p).is_ok()
+        });
         if self.all.len() != before {
             self.refilter(false);
         }

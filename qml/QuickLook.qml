@@ -19,7 +19,9 @@ LoafPopup {
     Shortcut {
         sequences: ["Return", "Enter"]
         enabled: quickLook.visible && (quickLook.info.path || "").length > 0
-        onActivated: { core.open_item(quickLook.info.path); quickLook.close(); }
+        // Same as Enter in the file view: folders and archives open inside
+        // Loaf, and the Trash keeps its own rules.
+        onActivated: { quickLook.close(); window.activePane.openSelected(); }
     }
 
     // No resting scale/opacity of 0: with animations off (reduce motion,
@@ -99,6 +101,10 @@ LoafPopup {
         if (info.kind === "archive")
             core.start_archive_preview(path);
         previewHtml = buildPreviewHtml();
+        // The exit transition leaves opacity/scale low; with animations off the
+        // enter transition won't restore them.
+        opacity = 1;
+        scale = 1;
         openAt((window.width - width) / 2, (window.height - height) / 2);
     }
 

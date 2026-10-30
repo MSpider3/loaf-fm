@@ -475,12 +475,14 @@ fn needs_archive(single: bool, is_dir: bool, params: &CreateShareParams) -> bool
     !single || password_archive || if is_dir { params.compress_folders } else { params.compress_files }
 }
 
-/// Where share archives are built: a 0700 folder in the user's runtime dir
-/// (not world-writable /tmp, where another user could pre-create it).
+/// Where share archives are built: a 0700 folder in the user's cache dir —
+/// on disk (the runtime dir is a small tmpfs; GB-sized shares would fail)
+/// and not world-writable /tmp, where another user could pre-create it.
 fn private_share_dir() -> std::io::Result<PathBuf> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-    let base = std::env::var("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
-    let dir = base.join(format!("loaf-share-{}", std::process::id()));
+    let base = util::cache_home().join("loaf");
+    std::fs::create_dir_all(&base)?;
+    let dir = base.join(format!("share-{}", std::process::id()));
     match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}

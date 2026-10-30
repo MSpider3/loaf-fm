@@ -304,9 +304,14 @@ pub fn replace(src: &Path, dst: &Path, is_move: bool, mon: &dyn Monitor) -> io::
     };
     let old = match crate::trash::trash(dst) {
         Ok(item) => item,
-        Err(e) => {
-            undo_stage(&staged);
-            return Err(io::Error::new(e.kind(), format!("could not move the existing item to the trash: {}", e)));
+        // No usable trash on this filesystem (root-owned mount, NFS, MTP…):
+        // replace the way it always worked (set aside, swap, delete).
+        Err(_) => {
+            let r = swap_and_delete(&staged, dst);
+            if r.is_err() {
+                undo_stage(&staged);
+            }
+            return r;
         }
     };
     if let Err(e) = fs::rename(&staged, dst) {
@@ -315,6 +320,17 @@ pub fn replace(src: &Path, dst: &Path, is_move: bool, mon: &dyn Monitor) -> io::
         return Err(e);
     }
     Ok(())
+}
+
+/// Puts `staged` at `dst`, deleting what was there. Restores `dst` if the swap fails.
+fn swap_and_delete(staged: &Path, dst: &Path) -> io::Result<()> {
+    let old = staging_name(dst, "old");
+    fs::rename(dst, &old)?;
+    if let Err(e) = fs::rename(staged, dst) {
+        let _ = fs::rename(&old, dst);
+        return Err(e);
+    }
+    remove_tree(&old)
 }
 
 /// Merges folder `src` into existing folder `dst`: sub-folders that exist
@@ -365,9 +381,12 @@ pub fn replace_with_link(src: &Path, dst: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(src, &staged)?;
     let old = match crate::trash::trash(dst) {
         Ok(item) => item,
-        Err(e) => {
-            let _ = fs::remove_file(&staged);
-            return Err(io::Error::new(e.kind(), format!("could not move the existing item to the trash: {}", e)));
+        Err(_) => {
+            let r = swap_and_delete(&staged, dst);
+            if r.is_err() {
+                let _ = fs::remove_file(&staged);
+            }
+            return r;
         }
     };
     if let Err(e) = fs::rename(&staged, dst) {

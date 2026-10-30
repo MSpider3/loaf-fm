@@ -237,7 +237,8 @@ fn udisks(args: &[&str], stdin: Option<&[u8]>) -> Result<String, String> {
 pub fn mount(device: &str) -> Result<String, String> {
     let out = udisks(&["mount", "-b", device], None)?;
     // "Mounted /dev/sdb1 at /run/media/u/LABEL"
-    Ok(out.trim().rsplit(" at ").next().unwrap_or("").trim_end_matches('.').to_string())
+    // The label itself may contain " at " ("Photos at Home"): split at the first.
+    Ok(out.trim().split_once(" at ").map(|x| x.1).unwrap_or("").trim_end_matches('.').to_string())
 }
 
 pub fn unmount(device: &str) -> Result<(), String> {

@@ -174,8 +174,16 @@ fn fstype_in(path: &std::path::Path, mounts: &str) -> Option<String> {
 /// True for network and remote filesystems. A stat() there can hang for
 /// minutes when the server is gone, so callers on the UI thread skip it.
 pub fn on_network_fs(path: &std::path::Path) -> bool {
-    let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
-    fstype_in(path, &mounts).is_some_and(|t| {
+    on_network_fs_in(path, &mount_table())
+}
+
+/// /proc/self/mounts, for checking many paths with on_network_fs_in().
+pub fn mount_table() -> String {
+    std::fs::read_to_string("/proc/self/mounts").unwrap_or_default()
+}
+
+pub fn on_network_fs_in(path: &std::path::Path, mounts: &str) -> bool {
+    fstype_in(path, mounts).is_some_and(|t| {
         matches!(t.as_str(), "nfs" | "nfs4" | "cifs" | "smb3" | "smbfs" | "9p" | "davfs" | "ceph" | "glusterfs" | "afs" | "sshfs")
             || (t.starts_with("fuse.") && !matches!(t.as_str(), "fuse.portal" | "fuse.gvfsd-fuse-local"))
     })

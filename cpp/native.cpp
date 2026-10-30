@@ -287,8 +287,9 @@ static bool wantsAlphaBuffer()
     if (!f.open(QIODevice::ReadOnly))
         return false;
     const QJsonValue v = QJsonDocument::fromJson(f.readAll()).object().value(QStringLiteral("backgroundOpacity"));
-    const double opacity = v.isString() ? v.toString().toDouble() : v.toDouble(1.0);
-    return opacity > 0.0 && opacity < 0.999;
+    bool ok = v.isDouble();
+    const double opacity = v.isString() ? v.toString().toDouble(&ok) : v.toDouble(1.0);
+    return ok && opacity < 0.999; // 0 (fully transparent) needs alpha too
 }
 
 static bool g_alphaBuffer = false;
